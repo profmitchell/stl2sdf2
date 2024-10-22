@@ -1,78 +1,143 @@
-import os # to walk through directories, to rename files
 import sys
+import trimesh
+from PyQt6 import QtWidgets
+from PyQt6.QtWidgets import QFileDialog, QMessageBox
 
-# Libraries
-import trimesh # for converting voxel grids to meshes (to import objects into simulators)
+# Function to generate Shader Park SDF code
+def generate_shader_park_sdf_code(stl_file_path, scaling_factor, output_file_path):
+    try:
+        # Load the mesh file
+        mesh = trimesh.load_mesh(stl_file_path)
+        mesh.apply_scale(scaling_factor)
 
-# Modules
-import tools_sdf_generator
+        # Start generating Shader Park code with the sdTriangle function
+        shader_park_code = [
+            """
+// Function to calculate the signed distance to a triangle
+function sdTriangle(p, a, b, c) {
+    let ba = subtract(b, a);
+    let ca = subtract(c, a);
+    let pa = subtract(p, a);
+    let nor = cross(ba, ca);
+    return dot(nor, pa) / length(nor);
+}
 
-if __name__ == "__main__":
+// Combine all triangles into a single SDF function
+function sdf(pos) {
+    let d = 1e10; // Start with a large initial value
+            """
+        ]
 
-    print("Usage: ")
-    print("python {} <FILEPATH> scaling_factor".format(sys.argv[0]))
-    print("Example:\npython {} <FILEPATH> 1.0".format(sys.argv[0]))
+        # Iterate over each triangle in the mesh and add to the SDF function
+        for i, face in enumerate(mesh.faces):
+            vertices = mesh.vertices[face]
+            p1, p2, p3 = vertices
+            sdf_function = f"""
+    let p1_{i} = [{p1[0]}, {p1[1]}, {p1[2]}];
+    let p2_{i} = [{p2[0]}, {p2[1]}, {p2[2]}];
+    let p3_{i} = [{p3[0]}, {p3[1]}, {p3[2]}];
+    d = min(d, sdTriangle(pos, p1_{i}, p2_{i}, p3_{i}));
+            """
+            shader_park_code.append(sdf_function)
 
-    filename = sys.argv[1]
-    scaling_factor = float(sys.argv[2])
+        # Close the SDF function and directly set the SDF using setSDF()
+        shader_park_code.append("""
+    return d;
+}
 
-    # Generate a folder to store the images
-    print("Generating a folder to save the mesh")
-    # Generate a folder with the same name as the input file, without its ".binvox" extension
-    currentPathGlobal = os.path.dirname(os.path.abspath(__file__))
-    directory = currentPathGlobal + "/" + filename + "_sdf"
-    if not os.path.exists(directory):
-        os.makedirs(directory)
+function main() {
+    let pos = getPosition();
+    let d = sdf(pos); // Call the SDF function
+    setSDF(d);  // Directly set the SDF for rendering
+}
+""")
 
-    mesh = trimesh.load(filename)
-    # scaling_factor = 100
-    mesh.apply_scale(scaling=scaling_factor)
+        # Join the code into a single string
+        sdf_code_output = "\n".join(shader_park_code)
 
-    mass = 0.00
-    mass = mesh.volume # WATER density
-    print("\n\nMesh volume: {} (used as mass)".format(mesh.volume))
-    print("Mass (equal to volume): {0}".format(mass))
-    print("Mesh convex hull volume: {}\n\n".format(mesh.convex_hull.volume))
-    print("Mesh bounding box volume: {}".format(mesh.bounding_box.volume))
+        # Write the generated Shader Park code to the output file
+        with open(output_file_path, 'w') as f:
+            f.write(sdf_code_output)
 
-    print("Merging vertices closer than a pre-set constant...")
-    mesh.merge_vertices()
-    print("Removing duplicate faces...")
-    mesh.remove_duplicate_faces()
-    print("Making the mesh watertight...")
-    trimesh.repair.fill_holes(mesh)
-    # print("Fixing inversion and winding...")
-    # trimesh.repair.fix_winding(mesh)
-    # trimesh.repair.fix_inversion(mesh)
-    trimesh.repair.fix_normals(mesh)
+        return True
+    except Exception as e:
+        print(f"Error: {e}")
+        return False
 
-    print("\n\nMesh volume: {}".format(mesh.volume))
-    print("Mesh convex hull volume: {}".format(mesh.convex_hull.volume))
-    print("Mesh bounding box volume: {}".format(mesh.bounding_box.volume))
+class SDFConverterApp(QtWidgets.QWidget):
+    def __init__(self):
+        super().__init__()
 
-    print("Computing the center of mass: ")
-    center_of_mass = mesh.center_mass
-    print(center_of_mass)
+        self.initUI()
 
-    print("Computing moments of inertia: ")
-    moments_of_inertia = mesh.moment_inertia
-    print(moments_of_inertia)  # inertia tensor in meshlab
+    def initUI(self):
+        self.setWindowTitle('STL to Shader Park Converter')
 
-    print("Generating the STL mesh file")
-    trimesh.exchange.export.export_mesh(
-        mesh=mesh,
-        file_obj=directory + "/mesh.stl",
-        file_type="stl"
-    )
+        layout = QtWidgets.QVBoxLayout()
 
-    print("Generating the SDF file...")
-    object_model_name = "mesh"
+        # Input STL File
+        self.stl_file_label = QtWidgets.QLabel('Select STL File:')
+        layout.addWidget(self.stl_file_label)
+        self.stl_file_path = QtWidgets.QLineEdit(self)
+        layout.addWidget(self.stl_file_path)
+        self.stl_file_btn = QtWidgets.QPushButton('Browse', self)
+        self.stl_file_btn.clicked.connect(self.browse_stl_file)
+        layout.addWidget(self.stl_file_btn)
 
-    tools_sdf_generator.generate_model_sdf(
-        directory=directory,
-        object_name=object_model_name,
-        center_of_mass=center_of_mass,
-        inertia_tensor=moments_of_inertia,
-        mass=mass,
-        model_stl_path=directory + "/mesh.stl",
-        scale_factor = 1.0) #scale_normalisation_factor)
+        # Scaling Factor
+        self.scale_label = QtWidgets.QLabel('Scaling Factor:')
+        layout.addWidget(self.scale_label)
+        self.scale_factor = QtWidgets.QDoubleSpinBox(self)
+        self.scale_factor.setValue(1.0)
+        layout.addWidget(self.scale_factor)
+
+        # Output File
+        self.output_file_label = QtWidgets.QLabel('Save Shader Park Code:')
+        layout.addWidget(self.output_file_label)
+        self.output_file_path = QtWidgets.QLineEdit(self)
+        layout.addWidget(self.output_file_path)
+        self.output_file_btn = QtWidgets.QPushButton('Browse', self)
+        self.output_file_btn.clicked.connect(self.save_output_file)
+        layout.addWidget(self.output_file_btn)
+
+        # Convert Button
+        self.convert_btn = QtWidgets.QPushButton('Generate Shader Park Code', self)
+        self.convert_btn.clicked.connect(self.convert_stl_to_sdf)
+        layout.addWidget(self.convert_btn)
+
+        self.setLayout(layout)
+
+    def browse_stl_file(self):
+        stl_file, _ = QFileDialog.getOpenFileName(self, 'Select STL File', '', 'STL Files (*.stl)')
+        if stl_file:
+            self.stl_file_path.setText(stl_file)
+
+    def save_output_file(self):
+        output_file, _ = QFileDialog.getSaveFileName(self, 'Save Shader Park Code', '', 'JavaScript Files (*.js)')
+        if output_file:
+            self.output_file_path.setText(output_file)
+
+    def convert_stl_to_sdf(self):
+        stl_file = self.stl_file_path.text()
+        scaling_factor = self.scale_factor.value()
+        output_file = self.output_file_path.text()
+
+        if not stl_file or not output_file:
+            QMessageBox.warning(self, 'Input Error', 'Please specify the STL file and output file path.')
+            return
+
+        success = generate_shader_park_sdf_code(stl_file, scaling_factor, output_file)
+
+        if success:
+            QMessageBox.information(self, 'Success', 'Shader Park code has been generated successfully!')
+        else:
+            QMessageBox.critical(self, 'Error', 'Failed to generate Shader Park code.')
+
+def main():
+    app = QtWidgets.QApplication(sys.argv)
+    window = SDFConverterApp()
+    window.show()
+    sys.exit(app.exec())
+
+if __name__ == '__main__':
+    main()
